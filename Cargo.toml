@@ -1,0 +1,12 @@
+[package]
+name = "particle_life_3d"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+enum-map = "2.5.0"
+macroquad = "0.3.25"
+rand = "0.8.5"
+rayon = "1.7.0"
