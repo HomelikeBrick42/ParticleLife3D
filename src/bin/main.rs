@@ -258,11 +258,12 @@ impl eframe::App for App {
                         .prepare(move |device, queue, encoder, paint_callback_resources| {
                             let renderer: &mut Renderer =
                                 paint_callback_resources.get_mut().unwrap();
-                            renderer.prepare(&camera, &particles, &colors, device, queue, encoder)
+                            renderer
+                                .prepare(&camera, &particles, &colors, rect, device, queue, encoder)
                         })
-                        .paint(move |info, render_pass, paint_callback_resources| {
+                        .paint(move |_info, render_pass, paint_callback_resources| {
                             let renderer: &Renderer = paint_callback_resources.get().unwrap();
-                            renderer.paint(info, sphere_count as _, render_pass);
+                            renderer.paint(sphere_count as _, render_pass);
                         }),
                 ),
             });
@@ -450,11 +451,13 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         camera: &[u8],
         particles: &[u8],
         colors: &[u8],
+        _rect: egui::Rect,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _encoder: &wgpu::CommandEncoder,
@@ -506,12 +509,7 @@ impl Renderer {
         vec![]
     }
 
-    fn paint<'a>(
-        &'a self,
-        _info: eframe::epaint::PaintCallbackInfo,
-        sphere_count: u32,
-        render_pass: &mut wgpu::RenderPass<'a>,
-    ) {
+    fn paint<'a>(&'a self, sphere_count: u32, render_pass: &mut wgpu::RenderPass<'a>) {
         render_pass.set_pipeline(&self.sphere_render_pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.particles_bind_group, &[]);

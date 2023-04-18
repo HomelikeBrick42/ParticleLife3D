@@ -5,7 +5,9 @@ struct VertexIn {
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) particle_index: u32,
+    @location(0) world_position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) particle_index: u32,
 };
 
 struct Camera {
@@ -46,18 +48,25 @@ fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
     out.particle_index = in.particle_index;
 
-    let position = camera.projection_matrix * camera.view_matrix * vec4(particles.particles[in.particle_index].position, 1.0);
-    out.position = position + vec4(
-        f32((in.vertex_index >> 0u) & 1u) - 0.5 / position.w,
-        f32((in.vertex_index >> 1u) & 1u) - 0.5 / position.w,
+    out.uv = vec2(f32((in.vertex_index >> 0u) & 1u), f32((in.vertex_index >> 1u) & 1u));
+
+    out.position = camera.view_matrix * vec4(particles.particles[in.particle_index].position, 1.0);
+    out.position += vec4(
+        (out.uv - 0.5) * 0.1,
         0.0,
         0.0,
     );
+    out.position = camera.projection_matrix * out.position;
+
+    out.world_position = out.position.xyz / out.position.w;
 
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
+    if length(in.uv * 2.0 - 1.0) > 1.0 {
+        discard;
+    }
     return vec4(colors.colors[particles.particles[in.particle_index].id], 1.0);
 }
