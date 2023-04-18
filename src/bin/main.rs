@@ -258,8 +258,7 @@ impl eframe::App for App {
                         .prepare(move |device, queue, encoder, paint_callback_resources| {
                             let renderer: &mut Renderer =
                                 paint_callback_resources.get_mut().unwrap();
-                            renderer
-                                .prepare(&camera, &particles, &colors, rect, device, queue, encoder)
+                            renderer.prepare(&camera, &particles, &colors, device, queue, encoder)
                         })
                         .paint(move |_info, render_pass, paint_callback_resources| {
                             let renderer: &Renderer = paint_callback_resources.get().unwrap();
@@ -282,7 +281,7 @@ struct Renderer {
     colors_storage_buffer_size: usize,
     particles_bind_group_layout: wgpu::BindGroupLayout,
     particles_bind_group: wgpu::BindGroup,
-    sphere_render_pipeline: wgpu::RenderPipeline,
+    particles_render_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -410,7 +409,7 @@ impl Renderer {
                     push_constant_ranges: &[],
                 });
 
-        let sphere_render_pipeline =
+        let particles_render_pipeline =
             render_state
                 .device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -431,7 +430,13 @@ impl Renderer {
                         topology: wgpu::PrimitiveTopology::TriangleStrip,
                         ..Default::default()
                     },
-                    depth_stencil: None, // TODO: depth buffer
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
                     multisample: wgpu::MultisampleState {
                         ..Default::default()
                     },
@@ -447,70 +452,72 @@ impl Renderer {
             colors_storage_buffer_size: COLORS_STORAGE_BUFFER_SIZE,
             particles_bind_group_layout,
             particles_bind_group,
-            sphere_render_pipeline,
+            particles_render_pipeline,
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &mut self,
         camera: &[u8],
         particles: &[u8],
         colors: &[u8],
-        _rect: egui::Rect,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _encoder: &wgpu::CommandEncoder,
     ) -> Vec<wgpu::CommandBuffer> {
+        // Update camera
         queue.write_buffer(&self.camera_uniform_buffer, 0, camera);
 
-        let mut particles_bind_group_invalidated = false;
-        if self.particles_storage_buffer_size >= particles.len() {
-            queue.write_buffer(&self.particles_storage_buffer, 0, particles);
-        } else {
-            particles_bind_group_invalidated = true;
-            self.particles_storage_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Particles Storage Buffer"),
-                    contents: particles,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+        // Update particles and colors
+        {
+            let mut particles_bind_group_invalidated = false;
+            if self.particles_storage_buffer_size >= particles.len() {
+                queue.write_buffer(&self.particles_storage_buffer, 0, particles);
+            } else {
+                particles_bind_group_invalidated = true;
+                self.particles_storage_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Particles Storage Buffer"),
+                        contents: particles,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                    });
+                self.particles_storage_buffer_size = particles.len();
+            }
+            if self.colors_storage_buffer_size >= particles.len() {
+                queue.write_buffer(&self.colors_storage_buffer, 0, colors);
+            } else {
+                particles_bind_group_invalidated = true;
+                self.colors_storage_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Particles Storage Buffer"),
+                        contents: colors,
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                    });
+                self.colors_storage_buffer_size = colors.len();
+            }
+            if particles_bind_group_invalidated {
+                self.particles_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Particles Bind Group"),
+                    layout: &self.particles_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.particles_storage_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.colors_storage_buffer.as_entire_binding(),
+                        },
+                    ],
                 });
-            self.particles_storage_buffer_size = particles.len();
-        }
-        if self.colors_storage_buffer_size >= particles.len() {
-            queue.write_buffer(&self.colors_storage_buffer, 0, colors);
-        } else {
-            particles_bind_group_invalidated = true;
-            self.colors_storage_buffer =
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Particles Storage Buffer"),
-                    contents: colors,
-                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
-                });
-            self.colors_storage_buffer_size = colors.len();
-        }
-        if particles_bind_group_invalidated {
-            self.particles_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Particles Bind Group"),
-                layout: &self.particles_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.particles_storage_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.colors_storage_buffer.as_entire_binding(),
-                    },
-                ],
-            });
+            }
         }
 
         vec![]
     }
 
     fn paint<'a>(&'a self, sphere_count: u32, render_pass: &mut wgpu::RenderPass<'a>) {
-        render_pass.set_pipeline(&self.sphere_render_pipeline);
+        render_pass.set_pipeline(&self.particles_render_pipeline);
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.particles_bind_group, &[]);
         render_pass.draw(0..4, 0..sphere_count);
@@ -524,9 +531,11 @@ fn main() {
             renderer: eframe::Renderer::Wgpu,
             wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
                 present_mode: wgpu::PresentMode::AutoNoVsync,
+                depth_format: Some(wgpu::TextureFormat::Depth32Float),
                 ..Default::default()
             },
             vsync: false,
+            depth_buffer: 32,
             ..Default::default()
         },
         Box::new(|cc| Box::new(App::new(cc))),
