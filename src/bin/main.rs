@@ -25,9 +25,9 @@ struct Axes {
 impl Camera {
     pub fn get_axes(&self) -> Axes {
         let forward = cgmath::vec3(
-            self.pitch.to_radians().cos() * (-self.yaw).to_radians().sin(),
+            self.pitch.to_radians().cos() * self.yaw.to_radians().sin(),
             self.pitch.to_radians().sin(),
-            self.pitch.to_radians().cos() * (-self.yaw).to_radians().cos(),
+            -self.pitch.to_radians().cos() * self.yaw.to_radians().cos(),
         )
         .normalize();
         let right = forward.cross(self.up).normalize();
@@ -105,7 +105,7 @@ impl App {
         };
 
         let camera = Camera {
-            position: cgmath::vec3(0.0, 0.0, -particles.world_size * 1.5),
+            position: cgmath::vec3(1.0, 0.0, particles.world_size * 1.5),
             up: cgmath::vec3(0.0, 1.0, 0.0),
             pitch: 0.0,
             yaw: 0.0,
@@ -139,7 +139,50 @@ impl eframe::App for App {
         self.fixed_time += ts;
         let start_update = std::time::Instant::now();
         if self.fixed_time.as_secs_f32() >= TIME_STEP {
-            self.particles.update(TIME_STEP);
+            let ts = TIME_STEP;
+
+            self.particles.update(ts);
+
+            if !ctx.wants_keyboard_input() {
+                ctx.input(|i| {
+                    let axes = self.camera.get_axes();
+
+                    if i.key_down(egui::Key::W) {
+                        self.camera.position += axes.forward * CAMERA_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::S) {
+                        self.camera.position -= axes.forward * CAMERA_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::A) {
+                        self.camera.position -= axes.right * CAMERA_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::D) {
+                        self.camera.position += axes.right * CAMERA_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::Q) {
+                        self.camera.position -= axes.up * CAMERA_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::E) {
+                        self.camera.position += axes.up * CAMERA_SPEED * ts;
+                    }
+
+                    if i.key_down(egui::Key::ArrowUp) {
+                        self.camera.pitch += CAMERA_ROTATION_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::ArrowDown) {
+                        self.camera.pitch -= CAMERA_ROTATION_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::ArrowLeft) {
+                        self.camera.yaw -= CAMERA_ROTATION_SPEED * ts;
+                    }
+                    if i.key_down(egui::Key::ArrowRight) {
+                        self.camera.yaw += CAMERA_ROTATION_SPEED * ts;
+                    }
+
+                    self.camera.pitch = self.camera.pitch.clamp(-89.9999, 89.9999);
+                });
+            }
+
             self.fixed_time -= std::time::Duration::from_secs_f32(TIME_STEP);
         }
         let update_elapsed = start_update.elapsed();
@@ -158,113 +201,72 @@ impl eframe::App for App {
             });
         });
 
-        let response = egui::CentralPanel::default()
-            .show(ctx, |ui| {
-                let (rect, response) =
-                    ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let (rect, _response) =
+                ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
 
-                let mut camera_uniform =
-                    UniformBuffer::new([0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _]);
-                camera_uniform
-                    .write(&{
-                        let axes = self.camera.get_axes();
-                        GpuCamera {
-                            view_matrix: cgmath::Matrix4::look_at_lh(
-                                cgmath::Point3::from_vec(self.camera.position),
-                                cgmath::Point3::from_vec(self.camera.position + axes.forward),
-                                axes.up,
+            let mut camera_uniform =
+                UniformBuffer::new([0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _]);
+            camera_uniform
+                .write(&{
+                    let axes = self.camera.get_axes();
+                    GpuCamera {
+                        view_matrix: cgmath::Matrix4::look_to_rh(
+                            cgmath::point3(
+                                self.camera.position.x,
+                                self.camera.position.y,
+                                self.camera.position.z,
                             ),
-                            projection_matrix: cgmath::perspective(
-                                cgmath::Rad::from(cgmath::Deg(60.0)),
-                                rect.width() / rect.height(),
-                                0.001,
-                                10000.0,
-                            ),
-                        }
-                    })
-                    .unwrap();
-                let camera = camera_uniform.into_inner();
+                            axes.forward,
+                            axes.up,
+                        ),
+                        projection_matrix: cgmath::perspective(
+                            cgmath::Rad::from(cgmath::Deg(60.0)),
+                            rect.width() / rect.height(),
+                            0.001,
+                            1000.0,
+                        ),
+                    }
+                })
+                .unwrap();
+            let camera = camera_uniform.into_inner();
 
-                let mut particles_storage = StorageBuffer::new(vec![]);
-                particles_storage
-                    .write(&GpuParticles {
-                        length: ArrayLength,
-                        particles: &self.particles.current_particles,
-                    })
-                    .unwrap();
-                let particles = particles_storage.into_inner();
+            let mut particles_storage = StorageBuffer::new(vec![]);
+            particles_storage
+                .write(&GpuParticles {
+                    length: ArrayLength,
+                    particles: &self.particles.current_particles,
+                })
+                .unwrap();
+            let particles = particles_storage.into_inner();
 
-                let mut colors_storage = StorageBuffer::new(vec![]);
-                colors_storage
-                    .write(&GpuColors {
-                        length: ArrayLength,
-                        particles: &self.particles.colors,
-                    })
-                    .unwrap();
-                let colors = colors_storage.into_inner();
+            let mut colors_storage = StorageBuffer::new(vec![]);
+            colors_storage
+                .write(&GpuColors {
+                    length: ArrayLength,
+                    particles: &self.particles.colors,
+                })
+                .unwrap();
+            let colors = colors_storage.into_inner();
 
-                let sphere_count = self.particles.current_particles.len();
+            let sphere_count = self.particles.current_particles.len();
 
-                ui.painter().add(egui::PaintCallback {
-                    rect,
-                    callback: std::sync::Arc::new(
-                        eframe::egui_wgpu::CallbackFn::new()
-                            .prepare(move |device, queue, encoder, paint_callback_resources| {
-                                let renderer: &mut Renderer =
-                                    paint_callback_resources.get_mut().unwrap();
-                                renderer
-                                    .prepare(&camera, &particles, &colors, device, queue, encoder)
-                            })
-                            .paint(move |info, render_pass, paint_callback_resources| {
-                                let renderer: &Renderer = paint_callback_resources.get().unwrap();
-                                renderer.paint(info, sphere_count as _, render_pass);
-                            }),
-                    ),
-                });
-
-                response
-            })
-            .inner;
-
-        if response.has_focus() {
-            ctx.input(|i| {
-                let axes = self.camera.get_axes();
-
-                if i.key_pressed(egui::Key::W) {
-                    self.camera.position += axes.forward * CAMERA_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::S) {
-                    self.camera.position -= axes.forward * CAMERA_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::A) {
-                    self.camera.position -= axes.right * CAMERA_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::D) {
-                    self.camera.position += axes.right * CAMERA_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::Q) {
-                    self.camera.position -= axes.up * CAMERA_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::E) {
-                    self.camera.position += axes.up * CAMERA_SPEED * ts;
-                }
-
-                if i.key_pressed(egui::Key::ArrowUp) {
-                    self.camera.pitch += CAMERA_ROTATION_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::ArrowDown) {
-                    self.camera.pitch -= CAMERA_ROTATION_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::ArrowLeft) {
-                    self.camera.yaw -= CAMERA_ROTATION_SPEED * ts;
-                }
-                if i.key_pressed(egui::Key::ArrowRight) {
-                    self.camera.yaw += CAMERA_ROTATION_SPEED * ts;
-                }
-
-                self.camera.pitch = self.camera.pitch.clamp(-89.9999, 89.9999);
+            ui.painter().add(egui::PaintCallback {
+                rect,
+                callback: std::sync::Arc::new(
+                    eframe::egui_wgpu::CallbackFn::new()
+                        .prepare(move |device, queue, encoder, paint_callback_resources| {
+                            let renderer: &mut Renderer =
+                                paint_callback_resources.get_mut().unwrap();
+                            renderer.prepare(&camera, &particles, &colors, device, queue, encoder)
+                        })
+                        .paint(move |info, render_pass, paint_callback_resources| {
+                            let renderer: &Renderer = paint_callback_resources.get().unwrap();
+                            renderer.paint(info, sphere_count as _, render_pass);
+                        }),
+                ),
             });
-        }
+        });
 
         ctx.request_repaint();
     }

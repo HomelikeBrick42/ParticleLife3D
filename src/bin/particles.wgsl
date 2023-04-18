@@ -46,13 +46,13 @@ fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
     out.particle_index = in.particle_index;
 
-    let position = vec4(
-        f32((in.vertex_index >> 0u) & 1u) - 0.5,
-        f32((in.vertex_index >> 1u) & 1u) - 0.5,
+    let position = camera.projection_matrix * camera.view_matrix * vec4(particles.particles[in.particle_index].position, 1.0);
+    out.position = position + vec4(
+        f32((in.vertex_index >> 0u) & 1u) - 0.5 / position.w,
+        f32((in.vertex_index >> 1u) & 1u) - 0.5 / position.w,
         0.0,
-        1.0,
+        0.0,
     );
-    out.position = position;
 
     return out;
 }
