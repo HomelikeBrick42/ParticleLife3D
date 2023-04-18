@@ -1,5 +1,7 @@
 use cgmath::prelude::*;
-use eframe::egui;
+use eframe::egui_wgpu::wgpu;
+use eframe::{egui, wgpu::util::DeviceExt};
+use encase::{ArrayLength, ShaderSize, ShaderType, StorageBuffer, UniformBuffer};
 use particle_life_3d::{Particle, Particles};
 use rand::prelude::*;
 
@@ -7,7 +9,6 @@ const CAMERA_SPEED: f32 = 5.0;
 const CAMERA_ROTATION_SPEED: f32 = 90.0;
 const TIME_STEP: f32 = 1.0 / 60.0;
 
-#[derive(Clone, Copy)]
 struct Camera {
     pub position: cgmath::Vector3<f32>,
     pub up: cgmath::Vector3<f32>,
@@ -15,7 +16,6 @@ struct Camera {
     pub yaw: f32,
 }
 
-#[derive(Clone, Copy)]
 struct Axes {
     pub forward: cgmath::Vector3<f32>,
     pub right: cgmath::Vector3<f32>,
@@ -36,6 +36,26 @@ impl Camera {
     }
 }
 
+#[derive(ShaderType)]
+struct GpuParticles<'a> {
+    pub length: ArrayLength,
+    #[size(runtime)]
+    pub particles: &'a [Particle],
+}
+
+#[derive(ShaderType)]
+struct GpuColors<'a> {
+    pub length: ArrayLength,
+    #[size(runtime)]
+    pub particles: &'a [cgmath::Vector3<f32>],
+}
+
+#[derive(ShaderType)]
+struct GpuCamera {
+    pub view_matrix: cgmath::Matrix4<f32>,
+    pub projection_matrix: cgmath::Matrix4<f32>,
+}
+
 struct App {
     particles: Particles,
     camera: Camera,
@@ -44,7 +64,7 @@ struct App {
 }
 
 impl App {
-    fn new(_cc: &eframe::CreationContext) -> Self {
+    fn new(cc: &eframe::CreationContext) -> Self {
         let mut particles = Particles {
             world_size: 10.0,
             id_count: 5,
@@ -91,12 +111,22 @@ impl App {
             yaw: 0.0,
         };
 
-        Self {
+        let app = Self {
             particles,
             camera,
             last_time: std::time::Instant::now(),
             fixed_time: std::time::Duration::ZERO,
-        }
+        };
+
+        let render_state = cc.wgpu_render_state.as_ref().unwrap();
+        let renderer = Renderer::new(render_state);
+        render_state
+            .renderer
+            .write()
+            .paint_callback_resources
+            .insert(renderer);
+
+        app
     }
 }
 
@@ -131,17 +161,64 @@ impl eframe::App for App {
         let response = egui::CentralPanel::default()
             .show(ctx, |ui| {
                 let (rect, response) =
-                    ui.allocate_exact_size(egui::Vec2::splat(300.0), egui::Sense::drag());
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+
+                let mut camera_uniform =
+                    UniformBuffer::new([0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _]);
+                camera_uniform
+                    .write(&{
+                        let axes = self.camera.get_axes();
+                        GpuCamera {
+                            view_matrix: cgmath::Matrix4::look_at_lh(
+                                cgmath::Point3::from_vec(self.camera.position),
+                                cgmath::Point3::from_vec(self.camera.position + axes.forward),
+                                axes.up,
+                            ),
+                            projection_matrix: cgmath::perspective(
+                                cgmath::Rad::from(cgmath::Deg(60.0)),
+                                rect.width() / rect.height(),
+                                0.001,
+                                10000.0,
+                            ),
+                        }
+                    })
+                    .unwrap();
+                let camera = camera_uniform.into_inner();
+
+                let mut particles_storage = StorageBuffer::new(vec![]);
+                particles_storage
+                    .write(&GpuParticles {
+                        length: ArrayLength,
+                        particles: &self.particles.current_particles,
+                    })
+                    .unwrap();
+                let particles = particles_storage.into_inner();
+
+                let mut colors_storage = StorageBuffer::new(vec![]);
+                colors_storage
+                    .write(&GpuColors {
+                        length: ArrayLength,
+                        particles: &self.particles.colors,
+                    })
+                    .unwrap();
+                let colors = colors_storage.into_inner();
+
+                let sphere_count = self.particles.current_particles.len();
+
                 ui.painter().add(egui::PaintCallback {
                     rect,
                     callback: std::sync::Arc::new(
                         eframe::egui_wgpu::CallbackFn::new()
-                            .prepare(
-                                move |_device, _queue, _encoder, _paint_callback_resources| {
-                                    Vec::new()
-                                },
-                            )
-                            .paint(move |_info, _render_pass, _paint_callback_resources| {}),
+                            .prepare(move |device, queue, encoder, paint_callback_resources| {
+                                let renderer: &mut Renderer =
+                                    paint_callback_resources.get_mut().unwrap();
+                                renderer
+                                    .prepare(&camera, &particles, &colors, device, queue, encoder)
+                            })
+                            .paint(move |info, render_pass, paint_callback_resources| {
+                                let renderer: &Renderer = paint_callback_resources.get().unwrap();
+                                renderer.paint(info, sphere_count as _, render_pass);
+                            }),
                     ),
                 });
 
@@ -193,11 +270,262 @@ impl eframe::App for App {
     }
 }
 
+struct Renderer {
+    camera_uniform_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    particles_storage_buffer: wgpu::Buffer,
+    particles_storage_buffer_size: usize,
+    colors_storage_buffer: wgpu::Buffer,
+    colors_storage_buffer_size: usize,
+    particles_bind_group_layout: wgpu::BindGroupLayout,
+    particles_bind_group: wgpu::BindGroup,
+    sphere_render_pipeline: wgpu::RenderPipeline,
+}
+
+impl Renderer {
+    fn new(render_state: &eframe::egui_wgpu::RenderState) -> Self {
+        let particles_shader =
+            render_state
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Particles Shader"),
+                    source: wgpu::ShaderSource::Wgsl(include_str!("./particles.wgsl").into()),
+                });
+
+        let camera_bind_group_layout =
+            render_state
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Camera Bind Group Layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: Some(<GpuCamera as ShaderSize>::SHADER_SIZE),
+                        },
+                        count: None,
+                    }],
+                });
+
+        let camera_uniform_buffer =
+            render_state
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Camera Uniform Buffer"),
+                    contents: &[0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _],
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+                });
+
+        let camera_bind_group = render_state
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Camera Bind Group"),
+                layout: &camera_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_uniform_buffer.as_entire_binding(),
+                }],
+            });
+
+        let particles_bind_group_layout =
+            render_state
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("Particles Bind Group Layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(<GpuParticles as ShaderType>::min_size()),
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(<GpuColors as ShaderType>::min_size()),
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+
+        const PARTICLES_STORAGE_BUFFER_SIZE: usize =
+            <GpuParticles as ShaderType>::METADATA.min_size().get() as _;
+        let particles_storage_buffer =
+            render_state
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Particles Storage Buffer"),
+                    contents: &[0; PARTICLES_STORAGE_BUFFER_SIZE],
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                });
+
+        const COLORS_STORAGE_BUFFER_SIZE: usize =
+            <GpuColors as ShaderType>::METADATA.min_size().get() as _;
+        let colors_storage_buffer =
+            render_state
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Particles Storage Buffer"),
+                    contents: &[0; COLORS_STORAGE_BUFFER_SIZE],
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                });
+
+        let particles_bind_group =
+            render_state
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Particles Bind Group"),
+                    layout: &particles_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: particles_storage_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: colors_storage_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+
+        let particles_pipeline_layout =
+            render_state
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Particles Pipeline Layout"),
+                    bind_group_layouts: &[&camera_bind_group_layout, &particles_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+        let sphere_render_pipeline =
+            render_state
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Particles Render Pipeline"),
+                    layout: Some(&particles_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &particles_shader,
+                        entry_point: "vs_main",
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &particles_shader,
+                        entry_point: "fs_main",
+                        targets: &[Some(render_state.target_format.into())],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        topology: wgpu::PrimitiveTopology::TriangleStrip,
+                        ..Default::default()
+                    },
+                    depth_stencil: None, // TODO: depth buffer
+                    multisample: wgpu::MultisampleState {
+                        ..Default::default()
+                    },
+                    multiview: None,
+                });
+
+        Self {
+            camera_uniform_buffer,
+            camera_bind_group,
+            particles_storage_buffer,
+            particles_storage_buffer_size: PARTICLES_STORAGE_BUFFER_SIZE,
+            colors_storage_buffer,
+            colors_storage_buffer_size: COLORS_STORAGE_BUFFER_SIZE,
+            particles_bind_group_layout,
+            particles_bind_group,
+            sphere_render_pipeline,
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        camera: &[u8],
+        particles: &[u8],
+        colors: &[u8],
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _encoder: &wgpu::CommandEncoder,
+    ) -> Vec<wgpu::CommandBuffer> {
+        queue.write_buffer(&self.camera_uniform_buffer, 0, camera);
+
+        let mut particles_bind_group_invalidated = false;
+        if self.particles_storage_buffer_size >= particles.len() {
+            queue.write_buffer(&self.particles_storage_buffer, 0, particles);
+        } else {
+            particles_bind_group_invalidated = true;
+            self.particles_storage_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Particles Storage Buffer"),
+                    contents: particles,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                });
+            self.particles_storage_buffer_size = particles.len();
+        }
+        if self.colors_storage_buffer_size >= particles.len() {
+            queue.write_buffer(&self.colors_storage_buffer, 0, colors);
+        } else {
+            particles_bind_group_invalidated = true;
+            self.colors_storage_buffer =
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Particles Storage Buffer"),
+                    contents: colors,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+                });
+            self.colors_storage_buffer_size = colors.len();
+        }
+        if particles_bind_group_invalidated {
+            self.particles_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Particles Bind Group"),
+                layout: &self.particles_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.particles_storage_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.colors_storage_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+        }
+
+        vec![]
+    }
+
+    fn paint<'a>(
+        &'a self,
+        _info: eframe::epaint::PaintCallbackInfo,
+        sphere_count: u32,
+        render_pass: &mut wgpu::RenderPass<'a>,
+    ) {
+        render_pass.set_pipeline(&self.sphere_render_pipeline);
+        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.particles_bind_group, &[]);
+        render_pass.draw(0..4, 0..sphere_count);
+    }
+}
+
 fn main() {
     eframe::run_native(
         "Particle Physics 3D",
         eframe::NativeOptions {
             renderer: eframe::Renderer::Wgpu,
+            wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+                present_mode: wgpu::PresentMode::AutoNoVsync,
+                ..Default::default()
+            },
             vsync: false,
             ..Default::default()
         },

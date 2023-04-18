@@ -5,13 +5,14 @@ use std::{
 };
 
 use cgmath::prelude::*;
+use encase::ShaderType;
 use rayon::prelude::*;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, ShaderType)]
 pub struct Particle {
     pub position: cgmath::Vector3<f32>,
     pub velocity: cgmath::Vector3<f32>,
-    pub id: usize,
+    pub id: u32,
 }
 
 #[derive(Default)]
@@ -19,7 +20,7 @@ pub struct Particles {
     pub world_size: f32,
     pub current_particles: Vec<Particle>,
     pub previous_particles: Vec<Particle>,
-    pub id_count: usize,
+    pub id_count: u32,
     pub attraction_matrix: Vec<f32>,
     pub colors: Vec<cgmath::Vector3<f32>>,
     pub friction_half_time: f32,
@@ -131,9 +132,10 @@ impl Particles {
                                                     }
                                                     let f = force(
                                                         distance,
-                                                        self.attraction_matrix[particle.id
+                                                        self.attraction_matrix[(particle.id
                                                             * self.id_count
-                                                            + other_particle.id],
+                                                            + other_particle.id)
+                                                            as usize],
                                                     );
                                                     total_force += relative_position / distance * f;
                                                 }
