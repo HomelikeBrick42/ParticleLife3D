@@ -1,5 +1,6 @@
 use cgmath::prelude::*;
 use eframe::egui_wgpu::wgpu;
+use eframe::wgpu::include_wgsl;
 use eframe::{egui, wgpu::util::DeviceExt};
 use encase::{ArrayLength, ShaderSize, ShaderType, StorageBuffer, UniformBuffer};
 use particle_life_3d::{Particle, Particles};
@@ -7,7 +8,6 @@ use rand::prelude::*;
 
 const CAMERA_SPEED: f32 = 5.0;
 const CAMERA_ROTATION_SPEED: f32 = 90.0;
-const TIME_STEP: f32 = 1.0 / 60.0;
 
 struct Camera {
     pub position: cgmath::Vector3<f32>,
@@ -38,6 +38,7 @@ impl Camera {
 
 #[derive(ShaderType)]
 struct GpuParticles<'a> {
+    pub world_size: f32,
     pub length: ArrayLength,
     #[size(runtime)]
     pub particles: &'a [Particle],
@@ -61,6 +62,7 @@ struct App {
     camera: Camera,
     last_time: std::time::Instant,
     fixed_time: std::time::Duration,
+    ticks_per_second: f32,
 }
 
 impl App {
@@ -83,7 +85,7 @@ impl App {
                 1.0, 1.0, 1.0, 1.0, 0.5, // purple
             ],
             particle_effect_radius: 2.0,
-            friction_half_time: 0.04,
+            friction: 0.97,
             force_scale: 1.0,
             current_particles: vec![],
             previous_particles: vec![],
@@ -105,7 +107,7 @@ impl App {
         };
 
         let camera = Camera {
-            position: cgmath::vec3(1.0, 0.0, particles.world_size * 1.5),
+            position: cgmath::vec3(1.0, 0.0, particles.world_size * 1.6),
             up: cgmath::vec3(0.0, 1.0, 0.0),
             pitch: 0.0,
             yaw: 0.0,
@@ -116,6 +118,7 @@ impl App {
             camera,
             last_time: std::time::Instant::now(),
             fixed_time: std::time::Duration::ZERO,
+            ticks_per_second: 60.0,
         };
 
         let render_state = cc.wgpu_render_state.as_ref().unwrap();
@@ -138,56 +141,54 @@ impl eframe::App for App {
 
         self.fixed_time += ts;
         let start_update = std::time::Instant::now();
-        if self.fixed_time.as_secs_f32() >= TIME_STEP {
-            let ts = TIME_STEP;
-
+        if self.fixed_time.as_secs_f32() >= 1.0 / self.ticks_per_second {
+            let ts = 1.0 / self.ticks_per_second;
             self.particles.update(ts);
-
-            if !ctx.wants_keyboard_input() {
-                ctx.input(|i| {
-                    let axes = self.camera.get_axes();
-
-                    if i.key_down(egui::Key::W) {
-                        self.camera.position += axes.forward * CAMERA_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::S) {
-                        self.camera.position -= axes.forward * CAMERA_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::A) {
-                        self.camera.position -= axes.right * CAMERA_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::D) {
-                        self.camera.position += axes.right * CAMERA_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::Q) {
-                        self.camera.position -= axes.up * CAMERA_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::E) {
-                        self.camera.position += axes.up * CAMERA_SPEED * ts;
-                    }
-
-                    if i.key_down(egui::Key::ArrowUp) {
-                        self.camera.pitch += CAMERA_ROTATION_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::ArrowDown) {
-                        self.camera.pitch -= CAMERA_ROTATION_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::ArrowLeft) {
-                        self.camera.yaw -= CAMERA_ROTATION_SPEED * ts;
-                    }
-                    if i.key_down(egui::Key::ArrowRight) {
-                        self.camera.yaw += CAMERA_ROTATION_SPEED * ts;
-                    }
-
-                    self.camera.pitch = self.camera.pitch.clamp(-89.9999, 89.9999);
-                });
-            }
-
-            self.fixed_time -= std::time::Duration::from_secs_f32(TIME_STEP);
+            self.fixed_time -= std::time::Duration::from_secs_f32(1.0 / self.ticks_per_second);
         }
         let update_elapsed = start_update.elapsed();
 
         let ts = ts.as_secs_f32();
+
+        if !ctx.wants_keyboard_input() {
+            ctx.input(|i| {
+                let axes = self.camera.get_axes();
+
+                if i.key_down(egui::Key::W) {
+                    self.camera.position += axes.forward * CAMERA_SPEED * ts;
+                }
+                if i.key_down(egui::Key::S) {
+                    self.camera.position -= axes.forward * CAMERA_SPEED * ts;
+                }
+                if i.key_down(egui::Key::A) {
+                    self.camera.position -= axes.right * CAMERA_SPEED * ts;
+                }
+                if i.key_down(egui::Key::D) {
+                    self.camera.position += axes.right * CAMERA_SPEED * ts;
+                }
+                if i.key_down(egui::Key::Q) {
+                    self.camera.position -= axes.up * CAMERA_SPEED * ts;
+                }
+                if i.key_down(egui::Key::E) {
+                    self.camera.position += axes.up * CAMERA_SPEED * ts;
+                }
+
+                if i.key_down(egui::Key::ArrowUp) {
+                    self.camera.pitch += CAMERA_ROTATION_SPEED * ts;
+                }
+                if i.key_down(egui::Key::ArrowDown) {
+                    self.camera.pitch -= CAMERA_ROTATION_SPEED * ts;
+                }
+                if i.key_down(egui::Key::ArrowLeft) {
+                    self.camera.yaw -= CAMERA_ROTATION_SPEED * ts;
+                }
+                if i.key_down(egui::Key::ArrowRight) {
+                    self.camera.yaw += CAMERA_ROTATION_SPEED * ts;
+                }
+
+                self.camera.pitch = self.camera.pitch.clamp(-89.9999, 89.9999);
+            });
+        }
 
         egui::SidePanel::left("Left Panel").show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -197,76 +198,106 @@ impl eframe::App for App {
                     "Update Time: {:.3}ms",
                     update_elapsed.as_secs_f64() * 1000.0
                 ));
+                ui.horizontal(|ui| {
+                    ui.label("World Size: ");
+                    ui.add(egui::DragValue::new(&mut self.particles.world_size).speed(0.1));
+                    self.particles.world_size = self
+                        .particles
+                        .world_size
+                        .max(self.particles.particle_effect_radius * 2.0);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Ticks Per Second: ");
+                    ui.add(egui::Slider::new(&mut self.ticks_per_second, 1.0..=1000.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Friction: ");
+                    ui.add(
+                        egui::Slider::new(&mut self.particles.friction, 0.0..=1.0)
+                            .drag_value_speed(0.01),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Force Scale: ");
+                    ui.add(egui::Slider::new(
+                        &mut self.particles.force_scale,
+                        0.0..=10.0,
+                    ));
+                });
                 ui.allocate_space(ui.available_size());
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let (rect, _response) =
-                ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(ctx.style().visuals.panel_fill))
+            .show(ctx, |ui| {
+                let (rect, _response) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
 
-            let mut camera_uniform =
-                UniformBuffer::new([0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _]);
-            camera_uniform
-                .write(&{
-                    let axes = self.camera.get_axes();
-                    GpuCamera {
-                        view_matrix: cgmath::Matrix4::look_to_rh(
-                            cgmath::point3(
-                                self.camera.position.x,
-                                self.camera.position.y,
-                                self.camera.position.z,
+                let mut camera_uniform =
+                    UniformBuffer::new([0; <GpuCamera as ShaderSize>::SHADER_SIZE.get() as _]);
+                camera_uniform
+                    .write(&{
+                        let axes = self.camera.get_axes();
+                        GpuCamera {
+                            view_matrix: cgmath::Matrix4::look_to_rh(
+                                cgmath::point3(
+                                    self.camera.position.x,
+                                    self.camera.position.y,
+                                    self.camera.position.z,
+                                ),
+                                axes.forward,
+                                axes.up,
                             ),
-                            axes.forward,
-                            axes.up,
-                        ),
-                        projection_matrix: cgmath::perspective(
-                            cgmath::Rad::from(cgmath::Deg(60.0)),
-                            rect.width() / rect.height(),
-                            0.001,
-                            1000.0,
-                        ),
-                    }
-                })
-                .unwrap();
-            let camera = camera_uniform.into_inner();
+                            projection_matrix: cgmath::perspective(
+                                cgmath::Rad::from(cgmath::Deg(90.0)),
+                                rect.width() / rect.height(),
+                                0.001,
+                                1000.0,
+                            ),
+                        }
+                    })
+                    .unwrap();
+                let camera = camera_uniform.into_inner();
 
-            let mut particles_storage = StorageBuffer::new(vec![]);
-            particles_storage
-                .write(&GpuParticles {
-                    length: ArrayLength,
-                    particles: &self.particles.current_particles,
-                })
-                .unwrap();
-            let particles = particles_storage.into_inner();
+                let mut particles_storage = StorageBuffer::new(vec![]);
+                particles_storage
+                    .write(&GpuParticles {
+                        world_size: self.particles.world_size,
+                        length: ArrayLength,
+                        particles: &self.particles.current_particles,
+                    })
+                    .unwrap();
+                let particles = particles_storage.into_inner();
 
-            let mut colors_storage = StorageBuffer::new(vec![]);
-            colors_storage
-                .write(&GpuColors {
-                    length: ArrayLength,
-                    particles: &self.particles.colors,
-                })
-                .unwrap();
-            let colors = colors_storage.into_inner();
+                let mut colors_storage = StorageBuffer::new(vec![]);
+                colors_storage
+                    .write(&GpuColors {
+                        length: ArrayLength,
+                        particles: &self.particles.colors,
+                    })
+                    .unwrap();
+                let colors = colors_storage.into_inner();
 
-            let sphere_count = self.particles.current_particles.len();
+                let sphere_count = self.particles.current_particles.len();
 
-            ui.painter().add(egui::PaintCallback {
-                rect,
-                callback: std::sync::Arc::new(
-                    eframe::egui_wgpu::CallbackFn::new()
-                        .prepare(move |device, queue, encoder, paint_callback_resources| {
-                            let renderer: &mut Renderer =
-                                paint_callback_resources.get_mut().unwrap();
-                            renderer.prepare(&camera, &particles, &colors, device, queue, encoder)
-                        })
-                        .paint(move |_info, render_pass, paint_callback_resources| {
-                            let renderer: &Renderer = paint_callback_resources.get().unwrap();
-                            renderer.paint(sphere_count as _, render_pass);
-                        }),
-                ),
+                ui.painter().add(egui::PaintCallback {
+                    rect,
+                    callback: std::sync::Arc::new(
+                        eframe::egui_wgpu::CallbackFn::new()
+                            .prepare(move |device, queue, encoder, paint_callback_resources| {
+                                let renderer: &mut Renderer =
+                                    paint_callback_resources.get_mut().unwrap();
+                                renderer
+                                    .prepare(&camera, &particles, &colors, device, queue, encoder)
+                            })
+                            .paint(move |_info, render_pass, paint_callback_resources| {
+                                let renderer: &Renderer = paint_callback_resources.get().unwrap();
+                                renderer.paint(sphere_count as _, render_pass);
+                            }),
+                    ),
+                });
             });
-        });
 
         ctx.request_repaint();
     }
@@ -282,17 +313,18 @@ struct Renderer {
     particles_bind_group_layout: wgpu::BindGroupLayout,
     particles_bind_group: wgpu::BindGroup,
     particles_render_pipeline: wgpu::RenderPipeline,
+    border_render_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
     fn new(render_state: &eframe::egui_wgpu::RenderState) -> Self {
-        let particles_shader =
-            render_state
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Particles Shader"),
-                    source: wgpu::ShaderSource::Wgsl(include_str!("./particles.wgsl").into()),
-                });
+        let particles_shader = render_state
+            .device
+            .create_shader_module(include_wgsl!("./particles.wgsl"));
+
+        let border_shader = render_state
+            .device
+            .create_shader_module(include_wgsl!("./border.wgsl"));
 
         let camera_bind_group_layout =
             render_state
@@ -443,6 +475,49 @@ impl Renderer {
                     multiview: None,
                 });
 
+        let border_pipeline_layout =
+            render_state
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("Border Pipeline Layout"),
+                    bind_group_layouts: &[&camera_bind_group_layout, &particles_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+
+        let border_render_pipeline =
+            render_state
+                .device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Border Render Pipeline"),
+                    layout: Some(&border_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &border_shader,
+                        entry_point: "vs_main",
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &border_shader,
+                        entry_point: "fs_main",
+                        targets: &[Some(render_state.target_format.into())],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        polygon_mode: wgpu::PolygonMode::Line,
+                        topology: wgpu::PrimitiveTopology::LineList,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        ..Default::default()
+                    },
+                    multiview: None,
+                });
+
         Self {
             camera_uniform_buffer,
             camera_bind_group,
@@ -453,6 +528,7 @@ impl Renderer {
             particles_bind_group_layout,
             particles_bind_group,
             particles_render_pipeline,
+            border_render_pipeline,
         }
     }
 
@@ -521,6 +597,11 @@ impl Renderer {
         render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
         render_pass.set_bind_group(1, &self.particles_bind_group, &[]);
         render_pass.draw(0..4, 0..sphere_count);
+
+        render_pass.set_pipeline(&self.border_render_pipeline);
+        render_pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.particles_bind_group, &[]);
+        render_pass.draw(0..24, 0..1);
     }
 }
 
@@ -532,6 +613,10 @@ fn main() {
             wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
                 present_mode: wgpu::PresentMode::AutoNoVsync,
                 depth_format: Some(wgpu::TextureFormat::Depth32Float),
+                device_descriptor: wgpu::DeviceDescriptor {
+                    features: wgpu::Features::POLYGON_MODE_LINE,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             vsync: false,

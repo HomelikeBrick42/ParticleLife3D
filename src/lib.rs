@@ -23,7 +23,7 @@ pub struct Particles {
     pub id_count: u32,
     pub attraction_matrix: Vec<f32>,
     pub colors: Vec<cgmath::Vector3<f32>>,
-    pub friction_half_time: f32,
+    pub friction: f32,
     pub force_scale: f32,
     pub particle_effect_radius: f32,
 }
@@ -108,8 +108,7 @@ impl Particles {
                                                     &self.previous_particles[index.load(Relaxed)];
 
                                                 let relative_position = other_particle.position
-                                                    - particle.position
-                                                    + offset;
+                                                    - (particle.position + offset);
                                                 let sqr_distance = relative_position.magnitude2();
                                                 if sqr_distance > 0.0
                                                     && sqr_distance
@@ -146,34 +145,44 @@ impl Particles {
                             }
                         }
                     }
-                    particle.velocity +=
-                        total_force * self.force_scale * self.particle_effect_radius * ts;
+
+                    // Update velocity
+                    {
+                        particle.velocity +=
+                            total_force * self.force_scale * self.particle_effect_radius * ts;
+                        let velocity_change = particle.velocity * self.friction * ts;
+                        if velocity_change.magnitude2() > particle.velocity.magnitude2() {
+                            particle.velocity = cgmath::vec3(0.0, 0.0, 0.0);
+                        } else {
+                            particle.velocity -= velocity_change;
+                        }
+                    }
+
+                    // Update position
+                    {
+                        particle.position += particle.velocity * ts;
+                        if particle.position.x > self.world_size * 0.5 {
+                            particle.position.x -= self.world_size;
+                        }
+                        if particle.position.x < -self.world_size * 0.5 {
+                            particle.position.x += self.world_size;
+                        }
+                        if particle.position.y > self.world_size * 0.5 {
+                            particle.position.y -= self.world_size;
+                        }
+                        if particle.position.y < -self.world_size * 0.5 {
+                            particle.position.y += self.world_size;
+                        }
+                        if particle.position.z > self.world_size * 0.5 {
+                            particle.position.z -= self.world_size;
+                        }
+                        if particle.position.z < -self.world_size * 0.5 {
+                            particle.position.z += self.world_size;
+                        }
+                    }
+
                     particle
                 }));
         }
-
-        let friction_constant = 0.5f32.powf(self.friction_half_time);
-        self.current_particles.par_iter_mut().for_each(|particle| {
-            particle.velocity -= particle.velocity * friction_constant * ts;
-            particle.position += particle.velocity * ts;
-            if particle.position.x > self.world_size * 0.5 {
-                particle.position.x -= self.world_size;
-            }
-            if particle.position.x < -self.world_size * 0.5 {
-                particle.position.x += self.world_size;
-            }
-            if particle.position.y > self.world_size * 0.5 {
-                particle.position.y -= self.world_size;
-            }
-            if particle.position.y < -self.world_size * 0.5 {
-                particle.position.y += self.world_size;
-            }
-            if particle.position.z > self.world_size * 0.5 {
-                particle.position.z -= self.world_size;
-            }
-            if particle.position.z < -self.world_size * 0.5 {
-                particle.position.z += self.world_size;
-            }
-        });
     }
 }

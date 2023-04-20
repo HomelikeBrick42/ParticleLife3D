@@ -26,6 +26,7 @@ struct Particle {
 };
 
 struct Particles {
+    world_size: f32,
     length: u32,
     particles: array<Particle>,
 };
