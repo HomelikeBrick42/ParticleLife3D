@@ -25,6 +25,7 @@ pub struct Particles {
     pub colors: Vec<cgmath::Vector3<f32>>,
     pub friction: f32,
     pub force_scale: f32,
+    pub min_attraction_percentage: f32,
     pub particle_effect_radius: f32,
 }
 
@@ -80,64 +81,72 @@ impl Particles {
             self.current_particles.clear();
             self.current_particles
                 .par_extend(self.previous_particles.par_iter().map(|&(mut particle)| {
-                    let mut total_force = cgmath::Vector3::zero();
-                    for x_offset in -1..=1 {
-                        for y_offset in -1..=1 {
-                            for z_offset in -1..=1 {
-                                let offset =
-                                    cgmath::vec3(x_offset as _, y_offset as _, z_offset as _)
-                                        * self.world_size;
-                                let cell = cell_coord(particle.position + offset);
+                let mut total_force = cgmath::Vector3::zero();
+                for x_offset in -1..=1 {
+                    for y_offset in -1..=1 {
+                        for z_offset in -1..=1 {
+                            let offset = cgmath::vec3(x_offset as _, y_offset as _, z_offset as _)
+                                * self.world_size;
+                            let cell = cell_coord(particle.position + offset);
 
-                                for x_cell_offset in -1isize..=1 {
-                                    for y_cell_offset in -1isize..=1 {
-                                        for z_cell_offset in -1isize..=1 {
-                                            let cell = cell
-                                                + cgmath::vec3(
-                                                    x_cell_offset,
-                                                    y_cell_offset,
-                                                    z_cell_offset,
-                                                );
+                            for x_cell_offset in -1isize..=1 {
+                                for y_cell_offset in -1isize..=1 {
+                                    for z_cell_offset in -1isize..=1 {
+                                        let cell = cell
+                                            + cgmath::vec3(
+                                                x_cell_offset,
+                                                y_cell_offset,
+                                                z_cell_offset,
+                                            );
 
-                                            let index = hash(cell) % hash_table_length;
-                                            for index in &particle_indices[hash_table[index]
-                                                .load(Relaxed)
-                                                ..hash_table[index + 1].load(Relaxed)]
+                                        let index = hash(cell) % hash_table_length;
+                                        for index in &particle_indices[hash_table[index]
+                                            .load(Relaxed)
+                                            ..hash_table[index + 1].load(Relaxed)]
+                                        {
+                                            let other_particle =
+                                                &self.previous_particles[index.load(Relaxed)];
+
+                                            let relative_position = other_particle.position
+                                                - (particle.position + offset);
+                                            let sqr_distance = relative_position.magnitude2();
+                                            if sqr_distance > 0.0
+                                                && sqr_distance
+                                                    < self.particle_effect_radius
+                                                        * self.particle_effect_radius
                                             {
-                                                let other_particle =
-                                                    &self.previous_particles[index.load(Relaxed)];
-
-                                                let relative_position = other_particle.position
-                                                    - (particle.position + offset);
-                                                let sqr_distance = relative_position.magnitude2();
-                                                if sqr_distance > 0.0
-                                                    && sqr_distance
-                                                        < self.particle_effect_radius
-                                                            * self.particle_effect_radius
-                                                {
-                                                    let distance = sqr_distance.sqrt();
-                                                    fn force(r: f32, attraction: f32) -> f32 {
-                                                        const BETA: f32 = 0.3;
-                                                        if r < BETA {
-                                                            r / BETA - 1.0
-                                                        } else if BETA < r && r < 1.0 {
+                                                let distance = sqr_distance.sqrt();
+                                                let force =
+                                                    |distance: f32, attraction: f32| -> f32 {
+                                                        if distance < self.min_attraction_percentage
+                                                        {
+                                                            distance
+                                                                / self.min_attraction_percentage
+                                                                - 1.0
+                                                        } else if self.min_attraction_percentage
+                                                            < distance
+                                                            && distance < 1.0
+                                                        {
                                                             attraction
-                                                                * (1.0
-                                                                    - (2.0 * r - 1.0 - BETA).abs()
-                                                                        / (1.0 - BETA))
+                                                                * (1.0 - (2.0 * distance
+                                                                    - 1.0
+                                                                    - self
+                                                                        .min_attraction_percentage)
+                                                                    .abs()
+                                                                    / (1.0 - self
+                                                                        .min_attraction_percentage))
                                                         } else {
                                                             0.0
                                                         }
-                                                    }
-                                                    let f = force(
-                                                        distance,
-                                                        self.attraction_matrix[(particle.id
-                                                            * self.id_count
-                                                            + other_particle.id)
-                                                            as usize],
-                                                    );
-                                                    total_force += relative_position / distance * f;
-                                                }
+                                                    };
+                                                let f = force(
+                                                    distance,
+                                                    self.attraction_matrix[(particle.id
+                                                        * self.id_count
+                                                        + other_particle.id)
+                                                        as usize],
+                                                );
+                                                total_force += relative_position / distance * f;
                                             }
                                         }
                                     }
@@ -145,44 +154,45 @@ impl Particles {
                             }
                         }
                     }
+                }
 
-                    // Update velocity
-                    {
-                        particle.velocity +=
-                            total_force * self.force_scale * self.particle_effect_radius * ts;
-                        let velocity_change = particle.velocity * self.friction * ts;
-                        if velocity_change.magnitude2() > particle.velocity.magnitude2() {
-                            particle.velocity = cgmath::vec3(0.0, 0.0, 0.0);
-                        } else {
-                            particle.velocity -= velocity_change;
-                        }
+                // Update velocity
+                {
+                    particle.velocity +=
+                        total_force * self.force_scale * self.particle_effect_radius * ts;
+                    let velocity_change = particle.velocity * self.friction * ts;
+                    if velocity_change.magnitude2() > particle.velocity.magnitude2() {
+                        particle.velocity = cgmath::vec3(0.0, 0.0, 0.0);
+                    } else {
+                        particle.velocity -= velocity_change;
                     }
+                }
 
-                    // Update position
-                    {
-                        particle.position += particle.velocity * ts;
-                        if particle.position.x > self.world_size * 0.5 {
-                            particle.position.x -= self.world_size;
-                        }
-                        if particle.position.x < -self.world_size * 0.5 {
-                            particle.position.x += self.world_size;
-                        }
-                        if particle.position.y > self.world_size * 0.5 {
-                            particle.position.y -= self.world_size;
-                        }
-                        if particle.position.y < -self.world_size * 0.5 {
-                            particle.position.y += self.world_size;
-                        }
-                        if particle.position.z > self.world_size * 0.5 {
-                            particle.position.z -= self.world_size;
-                        }
-                        if particle.position.z < -self.world_size * 0.5 {
-                            particle.position.z += self.world_size;
-                        }
+                // Update position
+                {
+                    particle.position += particle.velocity * ts;
+                    if particle.position.x > self.world_size * 0.5 {
+                        particle.position.x -= self.world_size;
                     }
+                    if particle.position.x < -self.world_size * 0.5 {
+                        particle.position.x += self.world_size;
+                    }
+                    if particle.position.y > self.world_size * 0.5 {
+                        particle.position.y -= self.world_size;
+                    }
+                    if particle.position.y < -self.world_size * 0.5 {
+                        particle.position.y += self.world_size;
+                    }
+                    if particle.position.z > self.world_size * 0.5 {
+                        particle.position.z -= self.world_size;
+                    }
+                    if particle.position.z < -self.world_size * 0.5 {
+                        particle.position.z += self.world_size;
+                    }
+                }
 
-                    particle
-                }));
+                particle
+            }));
         }
     }
 }

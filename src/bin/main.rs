@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use cgmath::prelude::*;
 use eframe::egui_wgpu::wgpu;
 use eframe::wgpu::include_wgsl;
@@ -65,6 +67,19 @@ struct App {
     ticks_per_second: f32,
 }
 
+fn random_particle(world_size: f32) -> Particle {
+    let mut rng = thread_rng();
+    Particle {
+        position: cgmath::vec3(
+            rng.gen_range(world_size * -0.5..=world_size * 0.5),
+            rng.gen_range(world_size * -0.5..=world_size * 0.5),
+            rng.gen_range(world_size * -0.5..=world_size * 0.5),
+        ),
+        velocity: cgmath::vec3(0.0, 0.0, 0.0),
+        id: rng.gen_range(0..5),
+    }
+}
+
 impl App {
     fn new(cc: &eframe::CreationContext) -> Self {
         let mut particles = Particles {
@@ -87,24 +102,15 @@ impl App {
             particle_effect_radius: 2.0,
             friction: 0.97,
             force_scale: 1.0,
+            min_attraction_percentage: 0.3,
             current_particles: vec![],
             previous_particles: vec![],
         };
 
-        particles.current_particles = {
-            let mut rng = thread_rng();
-            std::iter::repeat_with(|| Particle {
-                position: cgmath::vec3(
-                    rng.gen_range(particles.world_size * -0.5..=particles.world_size * 0.5),
-                    rng.gen_range(particles.world_size * -0.5..=particles.world_size * 0.5),
-                    rng.gen_range(particles.world_size * -0.5..=particles.world_size * 0.5),
-                ),
-                velocity: cgmath::vec3(0.0, 0.0, 0.0),
-                id: rng.gen_range(0..5),
-            })
-            .take(1000)
-            .collect()
-        };
+        particles.current_particles =
+            std::iter::repeat_with(|| random_particle(particles.world_size))
+                .take(1000)
+                .collect();
 
         let camera = Camera {
             position: cgmath::vec3(1.0, 0.0, particles.world_size * 1.6),
@@ -199,6 +205,29 @@ impl eframe::App for App {
                     update_elapsed.as_secs_f64() * 1000.0
                 ));
                 ui.horizontal(|ui| {
+                    ui.label("Particle Count: ");
+                    let mut particle_count = self.particles.current_particles.len();
+                    if ui
+                        .add(egui::DragValue::new(&mut particle_count).speed(0.1))
+                        .changed()
+                    {
+                        match particle_count.cmp(&self.particles.current_particles.len()) {
+                            Ordering::Less => {
+                                self.particles.current_particles.truncate(particle_count);
+                            }
+                            Ordering::Greater => {
+                                self.particles.current_particles.extend(
+                                    std::iter::repeat_with(|| {
+                                        random_particle(self.particles.world_size)
+                                    })
+                                    .take(particle_count - self.particles.current_particles.len()),
+                                );
+                            }
+                            Ordering::Equal => {}
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
                     ui.label("World Size: ");
                     ui.add(egui::DragValue::new(&mut self.particles.world_size).speed(0.1));
                     self.particles.world_size = self
@@ -222,6 +251,20 @@ impl eframe::App for App {
                     ui.add(egui::Slider::new(
                         &mut self.particles.force_scale,
                         0.0..=10.0,
+                    ));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Particle Effect Radius: ");
+                    ui.add(egui::Slider::new(
+                        &mut self.particles.particle_effect_radius,
+                        0.0..=self.particles.world_size / 2.0,
+                    ));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Repulsion Distance Percentage: ");
+                    ui.add(egui::Slider::new(
+                        &mut self.particles.min_attraction_percentage,
+                        0.0..=1.0,
                     ));
                 });
                 ui.allocate_space(ui.available_size());
