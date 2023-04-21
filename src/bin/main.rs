@@ -65,6 +65,7 @@ struct App {
     last_time: std::time::Instant,
     fixed_time: std::time::Duration,
     ticks_per_second: f32,
+    color_window_open: bool,
 }
 
 fn random_particle(world_size: f32) -> Particle {
@@ -125,6 +126,7 @@ impl App {
             last_time: std::time::Instant::now(),
             fixed_time: std::time::Duration::ZERO,
             ticks_per_second: 60.0,
+            color_window_open: false,
         };
 
         let render_state = cc.wgpu_render_state.as_ref().unwrap();
@@ -267,9 +269,54 @@ impl eframe::App for App {
                         0.0..=1.0,
                     ));
                 });
+                self.color_window_open |= ui.button("Particle Properties").clicked();
                 ui.allocate_space(ui.available_size());
             });
         });
+
+        egui::Window::new("Particle Properties")
+            .open(&mut self.color_window_open)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let size = ui.spacing().interact_size; // stolen from the color picker code
+                    ui.allocate_exact_size(size, egui::Sense::hover());
+
+                    for i in 0..self.particles.id_count {
+                        let mut ui_color = [
+                            self.particles.colors[i as usize].x,
+                            self.particles.colors[i as usize].y,
+                            self.particles.colors[i as usize].z,
+                        ];
+                        ui.color_edit_button_rgb(&mut ui_color);
+                        self.particles.colors[i as usize] =
+                            cgmath::vec3(ui_color[0], ui_color[1], ui_color[2]);
+                    }
+                });
+                for i in 0..self.particles.id_count {
+                    ui.horizontal(|ui| {
+                        let mut ui_color = [
+                            self.particles.colors[i as usize].x,
+                            self.particles.colors[i as usize].y,
+                            self.particles.colors[i as usize].z,
+                        ];
+                        ui.color_edit_button_rgb(&mut ui_color);
+                        self.particles.colors[i as usize] =
+                            cgmath::vec3(ui_color[0], ui_color[1], ui_color[2]);
+
+                        for j in 0..self.particles.id_count {
+                            ui.add(
+                                egui::DragValue::new(
+                                    &mut self.particles.attraction_matrix
+                                        [(i * self.particles.id_count + j) as usize],
+                                )
+                                .clamp_range(-1.0..=1.0)
+                                .speed(0.01),
+                            );
+                        }
+                    });
+                }
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(ctx.style().visuals.panel_fill))
