@@ -106,6 +106,8 @@ impl App {
             min_attraction_percentage: 0.3,
             current_particles: vec![],
             previous_particles: vec![],
+            solid_walls: false,
+            gravity: cgmath::vec3(0.0, 0.0, 0.0),
         };
 
         particles.current_particles =
@@ -238,6 +240,10 @@ impl eframe::App for App {
                         .max(self.particles.particle_effect_radius * 2.0);
                 });
                 ui.horizontal(|ui| {
+                    ui.label("Solid Walls: ");
+                    ui.checkbox(&mut self.particles.solid_walls, "");
+                });
+                ui.horizontal(|ui| {
                     ui.label("Ticks Per Second: ");
                     ui.add(egui::Slider::new(&mut self.ticks_per_second, 1.0..=1000.0));
                 });
@@ -268,6 +274,24 @@ impl eframe::App for App {
                         &mut self.particles.min_attraction_percentage,
                         0.0..=1.0,
                     ));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Gravity: ");
+                    ui.add(
+                        egui::DragValue::new(&mut self.particles.gravity.x)
+                            .prefix("x: ")
+                            .speed(0.01),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.particles.gravity.y)
+                            .prefix("y: ")
+                            .speed(0.01),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut self.particles.gravity.z)
+                            .prefix("z: ")
+                            .speed(0.01),
+                    );
                 });
                 self.color_window_open |= ui.button("Particle Properties").clicked();
                 ui.allocate_space(ui.available_size());
