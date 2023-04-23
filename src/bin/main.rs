@@ -151,7 +151,7 @@ impl eframe::App for App {
 
         self.fixed_time += ts;
         let start_update = std::time::Instant::now();
-        if self.fixed_time.as_secs_f32() >= 1.0 / self.ticks_per_second {
+        while self.fixed_time.as_secs_f32() >= 1.0 / self.ticks_per_second {
             let ts = 1.0 / self.ticks_per_second;
             self.particles.update(ts);
             self.fixed_time -= std::time::Duration::from_secs_f32(1.0 / self.ticks_per_second);
