@@ -151,10 +151,24 @@ impl eframe::App for App {
 
         self.fixed_time += ts;
         let start_update = std::time::Instant::now();
-        while self.fixed_time.as_secs_f32() >= 1.0 / self.ticks_per_second {
+        {
+            const MAX_ITERATIONS: usize = 2;
+            let mut iterations = 0;
             let ts = 1.0 / self.ticks_per_second;
-            self.particles.update(ts);
-            self.fixed_time -= std::time::Duration::from_secs_f32(1.0 / self.ticks_per_second);
+            while iterations < MAX_ITERATIONS && (self.fixed_time.as_secs_f32() >= ts) {
+                self.particles.update(ts);
+                self.fixed_time -= std::time::Duration::from_secs_f32(ts);
+                iterations += 1;
+            }
+            if iterations == MAX_ITERATIONS {
+                let iterations_skipped = (self.fixed_time.as_secs_f32() / ts) as usize;
+                eprintln!(
+                    "Cant keep up, skipped {} physics iterations",
+                    iterations_skipped
+                );
+                self.fixed_time -=
+                    std::time::Duration::from_secs_f32(iterations_skipped as f32 * ts);
+            }
         }
         let update_elapsed = start_update.elapsed();
 
